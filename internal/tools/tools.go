@@ -137,3 +137,42 @@ func Call(req types.RPCRequest) types.RPCResponse {
 	}
 	return types.NewSuccessResponse(req.ID, result)
 }
+
+// CallRaw calls a tool directly and returns the raw result
+func CallRaw(toolID string, input map[string]interface{}) (map[string]interface{}, error) {
+	mu.RLock()
+	defer mu.RUnlock()
+
+	tool, exists := toolRegistry[toolID]
+	if !exists {
+		return nil, fmt.Errorf("tool '%s' not found", toolID)
+	}
+
+	if tool.Call == nil {
+		return nil, fmt.Errorf("tool '%s' has no callable function", toolID)
+	}
+
+	result, err := tool.Call(input)
+	if err != nil {
+		return nil, err
+	}
+
+	// Most eBPF tools should return map[string]interface{} directly
+	if resultMap, ok := result.(map[string]interface{}); ok {
+		return resultMap, nil
+	}
+
+	// Fallback: convert via JSON if the tool returns a different structure
+	// This handles cases where tools return custom structs
+	jsonBytes, err := json.Marshal(result)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal tool result: %v", err)
+	}
+
+	var resultMap map[string]interface{}
+	if err := json.Unmarshal(jsonBytes, &resultMap); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal tool result: %v", err)
+	}
+
+	return resultMap, nil
+}
