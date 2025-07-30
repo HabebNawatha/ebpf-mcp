@@ -7,6 +7,7 @@ import (
 	"log"
 	"sync"
 
+	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/sameehj/ebpf-mcp/pkg/types"
 )
 
@@ -138,41 +139,72 @@ func Call(req types.RPCRequest) types.RPCResponse {
 	return types.NewSuccessResponse(req.ID, result)
 }
 
-// CallRaw calls a tool directly and returns the raw result
-func CallRaw(toolID string, input map[string]interface{}) (map[string]interface{}, error) {
+// CallTool finds a registered tool by ID, invokes it with input, and wraps the output in a GetPromptResult.
+func CallTool(toolID string, input map[string]interface{}) (*mcp.GetPromptResult, error) {
+	// Locking mechanism depends on how your toolRegistry is protected
 	mu.RLock()
-	defer mu.RUnlock()
-
 	tool, exists := toolRegistry[toolID]
+	mu.RUnlock()
+
 	if !exists {
-		return nil, fmt.Errorf("tool '%s' not found", toolID)
+		return &mcp.GetPromptResult{
+			Description: "Tool not found",
+			Messages: []mcp.PromptMessage{
+				{
+					Role:    mcp.RoleAssistant,
+					Content: mcp.TextContent{Type: "text", Text: fmt.Sprintf("Tool '%s' not found.", toolID)},
+				},
+			},
+		}, nil
 	}
 
 	if tool.Call == nil {
-		return nil, fmt.Errorf("tool '%s' has no callable function", toolID)
+		return &mcp.GetPromptResult{
+			Description: "Tool call not implemented",
+			Messages: []mcp.PromptMessage{
+				{
+					Role:    mcp.RoleAssistant,
+					Content: mcp.TextContent{Type: "text", Text: fmt.Sprintf("Tool '%s' has no callable function.", toolID)},
+				},
+			},
+		}, nil
 	}
 
+	// Run the tool
 	result, err := tool.Call(input)
 	if err != nil {
-		return nil, err
+		return &mcp.GetPromptResult{
+			Description: "Tool execution error",
+			Messages: []mcp.PromptMessage{
+				{
+					Role:    mcp.RoleAssistant,
+					Content: mcp.TextContent{Type: "text", Text: "Error: " + err.Error()},
+				},
+			},
+		}, nil
 	}
 
-	// Most eBPF tools should return map[string]interface{} directly
-	if resultMap, ok := result.(map[string]interface{}); ok {
-		return resultMap, nil
-	}
-
-	// Fallback: convert via JSON if the tool returns a different structure
-	// This handles cases where tools return custom structs
-	jsonBytes, err := json.Marshal(result)
+	// Try to marshal the output into JSON for display
+	jsonOutput, err := json.MarshalIndent(result, "", "  ")
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal tool result: %v", err)
+		return &mcp.GetPromptResult{
+			Description: "Failed to format output",
+			Messages: []mcp.PromptMessage{
+				{
+					Role:    mcp.RoleAssistant,
+					Content: mcp.TextContent{Type: "text", Text: "Failed to serialize tool output."},
+				},
+			},
+		}, nil
 	}
 
-	var resultMap map[string]interface{}
-	if err := json.Unmarshal(jsonBytes, &resultMap); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal tool result: %v", err)
-	}
-
-	return resultMap, nil
+	return &mcp.GetPromptResult{
+		Description: fmt.Sprintf("Output from tool '%s'", toolID),
+		Messages: []mcp.PromptMessage{
+			{
+				Role:    mcp.RoleAssistant,
+				Content: mcp.TextContent{Type: "text", Text: string(jsonOutput)},
+			},
+		},
+	}, nil
 }

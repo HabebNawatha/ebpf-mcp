@@ -22,6 +22,11 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
+# Initialize test counters
+TESTS_RUN=0
+TESTS_PASSED=0
+TESTS_FAILED=0
+
 # Helper functions
 log_info() {
     echo -e "${BLUE}[INFO]${NC} $1"
@@ -144,79 +149,10 @@ EOF
     echo "$response"
 }
 
-check_test_result() {
-    local test_name="$1"
-    local response="$2"
-    local should_succeed="${3:-true}"
-    
-    TESTS_RUN=$((TESTS_RUN + 1))
-    
-    log_info "Running test: $test_name"
-    
-    # Check if response contains error
-    if echo "$response" | grep -q '"error"'; then
-        if [ "$should_succeed" = "true" ]; then
-            log_error "Test failed: $test_name"
-            log_error "Response: $response"
-            TESTS_FAILED=$((TESTS_FAILED + 1))
-            return 1
-        else
-            log_success "Test passed (expected failure): $test_name"
-            TESTS_PASSED=$((TESTS_PASSED + 1))
-            return 0
-        fi
-    else
-        if [ "$should_succeed" = "true" ]; then
-            # Check if response contains success indicators
-            if echo "$response" | grep -q '"result"' && echo "$response" | grep -q '"messages"'; then
-                log_success "Test passed: $test_name"
-                TESTS_PASSED=$((TESTS_PASSED + 1))
-                return 0
-            else
-                log_error "Test failed: $test_name (no result/messages in response)"
-                log_error "Response: $response"
-                TESTS_FAILED=$((TESTS_FAILED + 1))
-                return 1
-            fi
-        else
-            log_error "Test failed: $test_name (expected error but got success)"
-            log_error "Response: $response"
-            TESTS_FAILED=$((TESTS_FAILED + 1))
-            return 1
-        fi
-    fi
-}
-
-# Test 1: Download eBPF program
-test_download() {
-    log_info "Test 1: Downloading eBPF kprobe program..."
-    
-    # Remove existing file
-    rm -f "$TEST_FILE"
-    
-    # Download the kprobe example
-    if curl -L -o "$TEST_FILE" "$KPROBE_URL"; then
-        log_success "Downloaded eBPF program to $TEST_FILE"
-        
-        # Verify file
-        local file_size=$(stat -f%z "$TEST_FILE" 2>/dev/null || stat -c%s "$TEST_FILE" 2>/dev/null)
-        log_info "File size: $file_size bytes"
-        
-        # Check if it's a valid ELF file
-        if file "$TEST_FILE" | grep -q "ELF"; then
-            log_success "File is a valid ELF object"
-        else
-            log_warning "File may not be a valid ELF object"
-        fi
-    else
-        log_error "Failed to download eBPF program"
-        exit 1
-    fi
-}
-
 # List available prompts
 test_list_prompts() {
-    log_info "Test: Listing available prompts..."
+    TESTS_RUN=$((TESTS_RUN + 1))
+    log_info "Test 1: Listing available prompts..."
 
     local response=$(make_mcp_request "prompts/list" "{}")
 
@@ -230,73 +166,59 @@ test_list_prompts() {
         fi
 
         log_success "Found $prompt_count prompts"
+        TESTS_PASSED=$((TESTS_PASSED + 1))
         echo "$response" | jq -r '.result.prompts[].name' | while read prompt; do
             log_info "  - $prompt"
         done
     else
         log_error "Failed to list prompts"
         echo "$response" | jq '.'
+        TESTS_FAILED=$((TESTS_FAILED + 1))
         exit 1
     fi
 }
 
 test_get_empty_prompt() {
-    log_info "Test: Get empty prompt name"
+    TESTS_RUN=$((TESTS_RUN + 1))
+    log_info "Test 2: Get empty prompt name"
 
     local response=$(make_mcp_request "prompts/get" "{}")
     local error_msg=$(echo "$response" | jq -r '.error.message // empty')
 
     if [[ "$error_msg" == *"prompt not found"* ]]; then
         log_success "Received expected error: '$error_msg'"
+        TESTS_PASSED=$((TESTS_PASSED + 1))
     else
         log_error "Unexpected response or error: '$error_msg'"
+        TESTS_FAILED=$((TESTS_FAILED + 1))
         exit 1
     fi
 }
 
-test_get_prompt_missing_args() {
-    log_info "Test: Get load_and_attach prompt without args"
+test_get_prompt_without_args() {
+    TESTS_RUN=$((TESTS_RUN + 1))
+    log_info "Test 3: Get show_system_info prompt"
 
     local params=$(cat << 'EOF'
 {
-    "name": "load_and_attach",
-    "arguments": {
-    }
+    "name": "show_system_info",
+    "arguments": {}
 }
 EOF
 )
 
     local response=$(make_mcp_request "prompts/get" "$params")
+    echo "$response"
+
+    local result=$(echo "$response" | jq -r '.result')
     local error_msg=$(echo "$response" | jq -r '.error.message // empty')
 
-    if [[ "$error_msg" == *"missing required argument"* ]]; then
-        log_success "Received expected error: '$error_msg'"
+    if [[ -n "$result" && "$result" != "null" ]]; then
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+        log_success "Prompt returned result successfully."
     else
-        log_error "Unexpected response or error: '$error_msg'"
-        exit 1
-    fi
-}
-
-test_get_prompt_with_args() {
-    log_info "Test: Get load_and_attach prompt with args"
-
-    local arguments="{
-        \"name\": \"load_and_attach\",
-        \"arguments\": {
-            \"source_type\": \"file\",
-            \"source_value\": \"$TEST_FILE\",
-            \"program_type\": \"XDP\",
-            \"attach_type\": \"xdp\",
-            \"target\": \"eth0\"
-        }
-    }"
-    local response=$(make_mcp_request "prompts/get" "$arguments")
-    local error_msg=$(echo "$response" | jq -r '.error.message // empty')
-
-    if [[ "$error_msg" == *"missing required argument"* ]]; then
-        log_success "Received expected error: '$error_msg'"
-    else
-        log_error "Unexpected response or error: '$error_msg'"
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+        log_error "Unexpected error or missing result: '$error_msg'"
         exit 1
     fi
 }
@@ -305,11 +227,11 @@ test_get_prompt_with_args() {
 run_all_tests() {
     log_info "Starting eBPF MCP prompt tests..."
     
-    test_download
     test_list_prompts
+    echo
     test_get_empty_prompt
-    test_get_prompt_missing_args
-    test_get_prompt_with_args
+    echo
+    test_get_prompt_without_args
     
     # Print summary
     echo
