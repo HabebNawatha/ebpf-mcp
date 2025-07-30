@@ -76,10 +76,26 @@ func init() {
 				return nil, fmt.Errorf("invalid attach_type '%s'. Must be xdp, kprobe, kretprobe, tracepoint, or cgroup", attachType)
 			}
 
-			// Build source object based on type
-			sourceObj := buildSourceObject(sourceType, args["source_value"], args)
+			// Build source object with proper structure
+			sourceObj := map[string]interface{}{
+				"type": sourceType,
+			}
 
-			// Build load program request
+			switch sourceType {
+			case "file":
+				sourceObj["path"] = args["source_value"]
+			case "url":
+				sourceObj["url"] = args["source_value"]
+			case "data":
+				sourceObj["blob"] = args["source_value"]
+			}
+
+			// Add checksum if provided
+			if checksum, exists := args["checksum"]; exists && checksum != "" {
+				sourceObj["checksum"] = checksum
+			}
+
+			// Build load program request with exact structure expected by tools
 			loadRequest := map[string]interface{}{
 				"source":       sourceObj,
 				"program_type": programType,
@@ -93,14 +109,34 @@ func init() {
 				loadRequest["btf_path"] = btfPath
 			}
 
-			// Add constraints if verify_only is specified and true
+			// Handle verify_only flag - this is critical!
 			verifyOnly := false
-			if vo, exists := args["verify_only"]; exists && vo == "true" {
+			if vo, exists := args["verify_only"]; exists && (vo == "true" || vo == "1") {
 				verifyOnly = true
+				// Build constraints object exactly like direct tool calls
 				loadRequest["constraints"] = map[string]interface{}{
 					"verify_only": true,
 				}
 			}
+
+			// Add other constraints if needed
+			constraints := make(map[string]interface{})
+			constraintsAdded := false
+
+			if verifyOnly {
+				constraints["verify_only"] = true
+				constraintsAdded = true
+			}
+
+			// You can add other constraint parsing here if needed
+			// For example, max_instructions, allowed_helpers, etc.
+
+			if constraintsAdded {
+				loadRequest["constraints"] = constraints
+			}
+
+			// Log the request for debugging
+			fmt.Printf("[DEBUG] Load request being sent: %+v", loadRequest)
 
 			// Prepare RPC request for load_program
 			loadRPCReq := types.RPCRequest{
@@ -139,7 +175,7 @@ func init() {
 				}), nil
 			}
 
-			// Build attach program request
+			// Build attach program request with proper structure
 			attachRequest := map[string]interface{}{
 				"program_id":  programID,
 				"attach_type": attachType,
@@ -151,7 +187,7 @@ func init() {
 				attachRequest["pin_path"] = pinPath
 			}
 
-			// Add optional flags and priority
+			// Add optional flags and priority in options object
 			options := make(map[string]interface{})
 			if flags, exists := args["flags"]; exists && flags != "" {
 				if flagsInt, err := parseIntArg(flags); err == nil {
@@ -166,6 +202,9 @@ func init() {
 			if len(options) > 0 {
 				attachRequest["options"] = options
 			}
+
+			// Log the attach request for debugging
+			fmt.Printf("[DEBUG] Attach request being sent: %+v", attachRequest)
 
 			// Prepare RPC request for attach_program
 			attachRPCReq := types.RPCRequest{
@@ -197,6 +236,156 @@ func init() {
 					mcp.NewTextContent(successMsg)),
 			}), nil
 		},
+		// Handler: func(ctx context.Context, req mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+		// 	args := req.Params.Arguments
+
+		// 	// Validate required arguments
+		// 	requiredArgs := []string{"source_type", "source_value", "program_type", "attach_type", "target"}
+		// 	for _, arg := range requiredArgs {
+		// 		if _, exists := args[arg]; !exists {
+		// 			return nil, fmt.Errorf("missing required argument: %s", arg)
+		// 		}
+		// 	}
+
+		// 	// Validate source_type
+		// 	sourceType := args["source_type"]
+		// 	if !isValidSourceType(sourceType) {
+		// 		return nil, fmt.Errorf("invalid source_type '%s'. Must be 'file', 'url', or 'data'", sourceType)
+		// 	}
+
+		// 	// Validate program_type
+		// 	programType := args["program_type"]
+		// 	if !isValidProgramType(programType) {
+		// 		return nil, fmt.Errorf("invalid program_type '%s'. Must be XDP, KPROBE, TRACEPOINT, or CGROUP_SKB", programType)
+		// 	}
+
+		// 	// Validate attach_type
+		// 	attachType := args["attach_type"]
+		// 	if !isValidAttachType(attachType) {
+		// 		return nil, fmt.Errorf("invalid attach_type '%s'. Must be xdp, kprobe, kretprobe, tracepoint, or cgroup", attachType)
+		// 	}
+
+		// 	// Build source object based on type
+		// 	sourceObj := buildSourceObject(sourceType, args["source_value"], args)
+
+		// 	// Build load program request
+		// 	loadRequest := map[string]interface{}{
+		// 		"source":       sourceObj,
+		// 		"program_type": programType,
+		// 	}
+
+		// 	// Add optional parameters for loading
+		// 	if section, exists := args["section"]; exists && section != "" {
+		// 		loadRequest["section"] = section
+		// 	}
+		// 	if btfPath, exists := args["btf_path"]; exists && btfPath != "" {
+		// 		loadRequest["btf_path"] = btfPath
+		// 	}
+
+		// 	// Add constraints if verify_only is specified and true
+		// 	verifyOnly := false
+		// 	if vo, exists := args["verify_only"]; exists && vo == "true" {
+		// 		verifyOnly = true
+		// 		loadRequest["constraints"] = map[string]interface{}{
+		// 			"verify_only": true,
+		// 		}
+		// 	}
+
+		// 	// Prepare RPC request for load_program
+		// 	loadRPCReq := types.RPCRequest{
+		// 		JSONRPC: "2.0",
+		// 		Method:  "callTool",
+		// 		Params: map[string]interface{}{
+		// 			"tool":  "load_program",
+		// 			"input": loadRequest,
+		// 		},
+		// 		ID: "load",
+		// 	}
+
+		// 	loadResp := tools.Call(loadRPCReq)
+		// 	if loadResp.Error != nil {
+		// 		return createErrorResult(fmt.Sprintf("Failed to load eBPF program: %v", loadResp.Error.Message))
+		// 	}
+
+		// 	resultMap, ok := loadResp.Result.(map[string]interface{})
+		// 	if !ok {
+		// 		return createErrorResult("Invalid load program response format")
+		// 	}
+
+		// 	programID, err := extractProgramID(resultMap)
+		// 	if err != nil {
+		// 		return createErrorResult(fmt.Sprintf("Failed to extract program ID: %v", err))
+		// 	}
+
+		// 	// If verify_only was true, stop here with success message
+		// 	if verifyOnly {
+		// 		return mcp.NewGetPromptResult("eBPF program verified successfully", []mcp.PromptMessage{
+		// 			mcp.NewPromptMessage(mcp.RoleUser,
+		// 				mcp.NewTextContent("Verify eBPF program")),
+		// 			mcp.NewPromptMessage(mcp.RoleAssistant,
+		// 				mcp.NewTextContent(fmt.Sprintf("✅ eBPF program verified successfully!\n\nProgram Type: %s\nSource: %s (%s)\nVerification completed without errors.",
+		// 					programType, args["source_value"], sourceType))),
+		// 		}), nil
+		// 	}
+
+		// 	// Build attach program request
+		// 	attachRequest := map[string]interface{}{
+		// 		"program_id":  programID,
+		// 		"attach_type": attachType,
+		// 		"target":      args["target"],
+		// 	}
+
+		// 	// Add optional pin_path
+		// 	if pinPath, exists := args["pin_path"]; exists && pinPath != "" {
+		// 		attachRequest["pin_path"] = pinPath
+		// 	}
+
+		// 	// Add optional flags and priority
+		// 	options := make(map[string]interface{})
+		// 	if flags, exists := args["flags"]; exists && flags != "" {
+		// 		if flagsInt, err := parseIntArg(flags); err == nil {
+		// 			options["flags"] = flagsInt
+		// 		}
+		// 	}
+		// 	if priority, exists := args["priority"]; exists && priority != "" {
+		// 		if priorityInt, err := parseIntArg(priority); err == nil {
+		// 			options["priority"] = priorityInt
+		// 		}
+		// 	}
+		// 	if len(options) > 0 {
+		// 		attachRequest["options"] = options
+		// 	}
+
+		// 	// Prepare RPC request for attach_program
+		// 	attachRPCReq := types.RPCRequest{
+		// 		JSONRPC: "2.0",
+		// 		Method:  "callTool",
+		// 		Params: map[string]interface{}{
+		// 			"tool":  "attach_program",
+		// 			"input": attachRequest,
+		// 		},
+		// 		ID: "attach",
+		// 	}
+
+		// 	attachResp := tools.Call(attachRPCReq)
+		// 	if attachResp.Error != nil {
+		// 		return createErrorResult(fmt.Sprintf("Program loaded (ID: %d) but failed to attach: %v", programID, attachResp.Error.Message))
+		// 	}
+
+		// 	attachResultMap, ok := attachResp.Result.(map[string]interface{})
+		// 	if !ok {
+		// 		return createErrorResult("Invalid attach program response format")
+		// 	}
+
+		// 	successMsg := buildSuccessMessage(args, programID, resultMap, attachResultMap)
+
+		// 	return mcp.NewGetPromptResult("eBPF program loaded and attached successfully", []mcp.PromptMessage{
+		// 		mcp.NewPromptMessage(mcp.RoleUser,
+		// 			mcp.NewTextContent("Load and attach eBPF program")),
+		// 		mcp.NewPromptMessage(mcp.RoleAssistant,
+		// 			mcp.NewTextContent(successMsg)),
+		// 	}), nil
+		// },
 	})
 }
 
