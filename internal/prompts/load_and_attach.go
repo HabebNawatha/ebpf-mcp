@@ -93,37 +93,53 @@ func init() {
 				loadRequest["btf_path"] = btfPath
 			}
 
-			// Add constraints if verify_only is specified
-			if verifyOnly, exists := args["verify_only"]; exists && verifyOnly == "true" {
+			// Add constraints if verify_only is specified and true
+			verifyOnly := false
+			if vo, exists := args["verify_only"]; exists && vo == "true" {
+				verifyOnly = true
 				loadRequest["constraints"] = map[string]interface{}{
 					"verify_only": true,
 				}
 			}
 
-			// Step 1: Load the eBPF program
-			loadResp, err := tools.CallRaw("load_program", loadRequest)
-			if err != nil {
-				return createErrorResult(fmt.Sprintf("Failed to load eBPF program: %v", err))
+			// Prepare RPC request for load_program
+			loadRPCReq := types.RPCRequest{
+				JSONRPC: "2.0",
+				Method:  "callTool",
+				Params: map[string]interface{}{
+					"tool":  "load_program",
+					"input": loadRequest,
+				},
+				ID: "load",
 			}
 
-			// Extract program ID from load response
-			programID, err := extractProgramID(loadResp)
+			loadResp := tools.Call(loadRPCReq)
+			if loadResp.Error != nil {
+				return createErrorResult(fmt.Sprintf("Failed to load eBPF program: %v", loadResp.Error.Message))
+			}
+
+			resultMap, ok := loadResp.Result.(map[string]interface{})
+			if !ok {
+				return createErrorResult("Invalid load program response format")
+			}
+
+			programID, err := extractProgramID(resultMap)
 			if err != nil {
 				return createErrorResult(fmt.Sprintf("Failed to extract program ID: %v", err))
 			}
 
-			// If verify_only was true, we stop here
-			if verifyOnly, exists := args["verify_only"]; exists && verifyOnly == "true" {
+			// If verify_only was true, stop here with success message
+			if verifyOnly {
 				return mcp.NewGetPromptResult("eBPF program verified successfully", []mcp.PromptMessage{
 					mcp.NewPromptMessage(mcp.RoleUser,
 						mcp.NewTextContent("Verify eBPF program")),
 					mcp.NewPromptMessage(mcp.RoleAssistant,
-						mcp.NewTextContent(fmt.Sprintf("✅ eBPF program verified successfully!\n\nProgram Type: %s\nSource: %s (%s)\nVerification completed without errors.", 
+						mcp.NewTextContent(fmt.Sprintf("✅ eBPF program verified successfully!\n\nProgram Type: %s\nSource: %s (%s)\nVerification completed without errors.",
 							programType, args["source_value"], sourceType))),
 				}), nil
 			}
 
-			// Step 2: Build attach request
+			// Build attach program request
 			attachRequest := map[string]interface{}{
 				"program_id":  programID,
 				"attach_type": attachType,
@@ -151,14 +167,28 @@ func init() {
 				attachRequest["options"] = options
 			}
 
-			// Step 3: Attach the program
-			attachResp, err := tools.CallRaw("attach_program", attachRequest)
-			if err != nil {
-				return createErrorResult(fmt.Sprintf("Program loaded (ID: %d) but failed to attach: %v", programID, err))
+			// Prepare RPC request for attach_program
+			attachRPCReq := types.RPCRequest{
+				JSONRPC: "2.0",
+				Method:  "callTool",
+				Params: map[string]interface{}{
+					"tool":  "attach_program",
+					"input": attachRequest,
+				},
+				ID: "attach",
 			}
 
-			// Build success message
-			successMsg := buildSuccessMessage(args, programID, loadResp, attachResp)
+			attachResp := tools.Call(attachRPCReq)
+			if attachResp.Error != nil {
+				return createErrorResult(fmt.Sprintf("Program loaded (ID: %d) but failed to attach: %v", programID, attachResp.Error.Message))
+			}
+
+			attachResultMap, ok := attachResp.Result.(map[string]interface{})
+			if !ok {
+				return createErrorResult("Invalid attach program response format")
+			}
+
+			successMsg := buildSuccessMessage(args, programID, resultMap, attachResultMap)
 
 			return mcp.NewGetPromptResult("eBPF program loaded and attached successfully", []mcp.PromptMessage{
 				mcp.NewPromptMessage(mcp.RoleUser,
@@ -276,35 +306,35 @@ func createErrorResult(errorMsg string) (*mcp.GetPromptResult, error) {
 func buildSuccessMessage(args map[string]string, programID int, loadResp, attachResp map[string]interface{}) string {
 	var msgBuilder strings.Builder
 	msgBuilder.WriteString("✅ eBPF program loaded and attached successfully!\n\n")
-	
+
 	// Program details
 	msgBuilder.WriteString(fmt.Sprintf("📋 Program Details:\n"))
 	msgBuilder.WriteString(fmt.Sprintf("  • Program ID: %d\n", programID))
 	msgBuilder.WriteString(fmt.Sprintf("  • Type: %s\n", args["program_type"]))
 	msgBuilder.WriteString(fmt.Sprintf("  • Source: %s (%s)\n", args["source_value"], args["source_type"]))
-	
+
 	// Attachment details
 	msgBuilder.WriteString(fmt.Sprintf("\n🔗 Attachment Details:\n"))
 	msgBuilder.WriteString(fmt.Sprintf("  • Attach Type: %s\n", args["attach_type"]))
 	msgBuilder.WriteString(fmt.Sprintf("  • Target: %s\n", args["target"]))
-	
+
 	// Extract link ID if available
 	if linkID := extractLinkID(attachResp); linkID != 0 {
 		msgBuilder.WriteString(fmt.Sprintf("  • Link ID: %d\n", linkID))
 	}
-	
+
 	// Pin path if specified
 	if pinPath, exists := args["pin_path"]; exists && pinPath != "" {
 		msgBuilder.WriteString(fmt.Sprintf("  • Pinned at: %s\n", pinPath))
 	}
-	
+
 	// Optional details
 	if section, exists := args["section"]; exists && section != "" {
 		msgBuilder.WriteString(fmt.Sprintf("  • Section: %s\n", section))
 	}
-	
+
 	msgBuilder.WriteString("\n🎉 The eBPF program is now active and monitoring kernel events!")
-	
+
 	return msgBuilder.String()
 }
 
@@ -317,7 +347,7 @@ func extractLinkID(response map[string]interface{}) int {
 			return int(id)
 		}
 	}
-	
+
 	// Try nested result
 	if result, exists := response["result"]; exists {
 		if resultMap, ok := result.(map[string]interface{}); ok {
@@ -331,6 +361,6 @@ func extractLinkID(response map[string]interface{}) int {
 			}
 		}
 	}
-	
+
 	return 0
 }
